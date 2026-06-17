@@ -93,10 +93,6 @@ one honest caveat below.
 brew install chipsforbeer/tap/lidmaxxing
 ```
 
-> Heads up: `brew install` works only after a published `v0.1.0` release and a
-> Homebrew tap exist — neither is set up yet (the repo is private). Use the
-> manual install below for now.
-
 ### Manual
 
 ```sh
