@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# lidmaxxing — close the lid, keep maxxing.
+#
+# Keeps your MacBook fully awake with the lid shut so your coding agents keep
+# running while you walk away. It flips two macOS power knobs and ALWAYS
+# restores them:
+#
+#   1. `pmset -a disablesleep 1`  -> closing the lid no longer sleeps the Mac
+#   2. `caffeinate -i`            -> idle sleep can't fire either (separate trigger)
+#
+# It does NOT touch the display. Closing the lid turns the internal screen off
+# on its own (less heat, less power); reopening drops you back into your
+# session because the Mac never actually slept.
+#
+# YOUR responsibility: turn it OFF when you're done (`lidmaxxing off`).
+# Leaving it on while unplugged in a bag will drain the battery.
+#
+# MIT licensed. Read every line — the `pmset` calls run as root.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/lidmaxxing"
+PID_FILE="$STATE_DIR/caffeinate.pid"
+
+# ---- output ------------------------------------------------------------------
+bold() { printf '\033[1m%s\033[0m' "$1"; }
+say()  { printf '%s\n' "$*"; }
+err()  { printf '%s\n' "$*" >&2; }
+
+require_macos() {
+  if [[ "$(uname)" != "Darwin" ]]; then
+    err "lidmaxxing only works on macOS."
+    exit 1
+  fi
+}
+
+# ---- power helpers -----------------------------------------------------------
+on_battery() { pmset -g batt 2>/dev/null | grep -q "Battery Power"; }
+
+battery_pct() { pmset -g batt 2>/dev/null | grep -oE '[0-9]+%' | head -1 || true; }
+
+warn_if_on_battery() {
+  if on_battery; then
+    err "⚠️  You're on battery ($(battery_pct)). A closed lid will drain it fast —"
+    err "    plug into AC before you walk away."
+  fi
+}
+
+# Only this needs root.
+set_disablesleep() {
+  # $1 = 0 | 1
+  sudo pmset -a disablesleep "$1"
+}
+
+# Is a lidmaxxing-managed session currently active?
+is_active() {
+  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+}
+
+# ---- commands ----------------------------------------------------------------
+cmd_on() {
+  require_macos
+  if is_active; then
+    say "☕ lidmaxxing is already ON. Close the lid and walk away."
+    return 0
+  fi
+  warn_if_on_battery
+  mkdir -p "$STATE_DIR"
+  set_disablesleep 1
+  nohup caffeinate -i >/dev/null 2>&1 &
+  echo $! > "$PID_FILE"
+  disown || true
+  say "$(bold '☕ lidmaxxing ON') — the lid is now a no-op. Agents keep maxxing."
+  say "   Close the lid and walk away (the screen turns off — that's normal)."
+  say "   Run '$(bold 'lidmaxxing off')' when you're done."
+}
+
+cmd_off() {
+  require_macos
+  if [[ -f "$PID_FILE" ]]; then
+    kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
+  # Always restore, even with no record — this is the panic button.
+  set_disablesleep 0
+  say "$(bold '😴 lidmaxxing OFF') — normal sleep restored. Closing the lid sleeps again."
+}
+
+cmd_status() {
+  require_macos
+  if is_active; then
+    say "$(bold 'ON ☕')  — closing the lid will NOT sleep this Mac."
+  else
+    say "$(bold 'OFF 😴') — closing the lid sleeps normally."
+  fi
+  local n
+  n=$(pmset -g assertions 2>/dev/null | grep -c 'caffeinate' || true)
+  say "   system caffeinate assertions: ${n}"
+  if on_battery; then
+    say "   power: battery ($(battery_pct))"
+  else
+    say "   power: AC"
+  fi
+  # Note: macOS does not surface `disablesleep` via `pmset -g`, so lidmaxxing
+  # tracks its own state (above) rather than guessing the OS value.
+}
+
+cmd_run() {
+  require_macos
+  if [[ $# -eq 0 ]]; then
+    err "usage: lidmaxxing -- <command> [args...]"
+    exit 64
+  fi
+
+  local was_active=0
+  if is_active; then was_active=1; fi
+  warn_if_on_battery
+
+  # Keep sudo's timestamp warm so cleanup never blocks on a password prompt
+  # in the middle of a long agent run.
+  sudo -v
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true 2>/dev/null || exit; sleep 30; done ) &
+  local keepalive=$!
+
+  cleanup() {
+    kill "$keepalive" 2>/dev/null || true
+    # If a persistent `on` session was already running, leave it on.
+    if [[ "$was_active" -eq 0 ]]; then
+      sudo -n pmset -a disablesleep 0 2>/dev/null \
+        || err "⚠️  couldn't restore sleep automatically — run 'lidmaxxing off'."
+    fi
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT TERM HUP
+
+  set_disablesleep 1
+  say "$(bold '☕ lidmaxxing') wrapping: $* — lid is a no-op until it exits."
+
+  local rc
+  set +e
+  caffeinate -i "$@"
+  rc=$?
+  set -e
+  exit "$rc"
+}
+
+usage() {
+  cat <<'EOF'
+lidmaxxing — close the lid, keep maxxing.
+
+Keeps your MacBook fully awake with the lid shut so coding agents keep
+running while you walk away. The screen still turns off (the lid does that);
+the machine just doesn't sleep.
+
+USAGE
+  lidmaxxing on            Turn it on; stays on until you turn it off.
+  lidmaxxing off           Turn it off; restore normal sleep. (panic button)
+  lidmaxxing status        Show whether it's on, plus current power source.
+  lidmaxxing -- <cmd...>   Turn on, run <cmd>, auto-restore sleep on exit.
+  lidmaxxing help          Show this help.
+  lidmaxxing version       Show version.
+
+EXAMPLES
+  # Agent already running in another tab? Just flip it on:
+  lidmaxxing on
+  #   ...close the lid, walk away. Later:
+  lidmaxxing off
+
+  # Or scope it to one command (auto-cleans up, even on Ctrl-C / crash):
+  lidmaxxing -- claude       # also: codex, opencode, any agent or long job
+
+NOTES
+  * Needs admin once per toggle (only the `pmset` call uses sudo).
+  * It's YOUR job to turn it off. Leaving it on while unplugged drains the battery.
+  * Best on AC power. Apple Silicon handles closed-lid load fine; Intel runs hotter.
+EOF
+}
+
+main() {
+  local sub="${1:-help}"
+  case "$sub" in
+    on)                    shift; cmd_on "$@";;
+    off)                   shift; cmd_off "$@";;
+    status|st)             shift; cmd_status "$@";;
+    --|run)                shift; cmd_run "$@";;
+    help|-h|--help)        usage;;
+    version|-v|--version)  say "lidmaxxing $VERSION";;
+    *) err "unknown command: $sub"; err ""; usage; exit 64;;
+  esac
+}
+
+main "$@"
