@@ -2,6 +2,10 @@
 
 **Close the lid, keep maxxing.**
 
+<p align="center">
+  <img src="assets/lidmaxxing-meme.jpg" alt="Drake meme: rejecting 'running caffeinate and praying', approving 'LIDMAXXING'" width="520">
+</p>
+
 A tiny CLI that keeps your MacBook fully awake with the lid shut, so your
 coding agents — Claude Code, Codex, OpenCode, anything — keep running while you walk away — instead of
 leaving the lid propped open like a savage.
